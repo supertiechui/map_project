@@ -122,6 +122,8 @@ double ROS_TIME(T msg)
 }
 
 float pointDistance(PointType p);
+
 float pointDistance(PointType p1, PointType p2);
+
 
 #endif

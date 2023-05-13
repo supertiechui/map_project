@@ -39,7 +39,7 @@ private:
     std::vector<std::string> sequence_scan_names_;
     std::vector<std::string> sequence_scan_paths_;
     int num_total_scans_of_sequence_;
-    float kDownsampleVoxelSize = 0.07;
+    float kDownsampleVoxelSize = 0.05;
 
     // sequence pose file
     std::string sequence_pose_path_;
@@ -49,6 +49,7 @@ private:
     // target region to removerting
     int start_idx_ = 400;
     int end_idx_ = 550;
+    int initilize_idx = 20;
 
     bool use_keyframe_gap_ = true;
     bool use_keyframe_meter_ = false;
@@ -74,7 +75,7 @@ private:
 
     //
     bool kFlagSaveMapPointcloud = true;
-    bool kFlagSaveCleanScans = false;
+    bool kFlagSaveCleanScans = true;
     std::string save_pcd_directory_;
 
     const float kFlagNoPOINT = 10000.0; // no point constant, 10000 has no meaning, but must be larger than the maximum scan range (e.g., 200 meters)
@@ -92,10 +93,10 @@ private:
     std::vector<pcl::PointCloud<PointType>::Ptr> scans_static_;
     std::vector<pcl::PointCloud<PointType>::Ptr> scans_dynamic_;
 
-    std::string scan_static_save_dir_;
-    std::string scan_dynamic_save_dir_;
-    std::string map_static_save_dir_;
-    std::string map_dynamic_save_dir_;
+    std::string scan_static_save_dir_ = "/home/heht/PCD_/Scans/static";
+    std::string scan_dynamic_save_dir_ = "/home/heht/PCD_/Scans/dynamic";
+    std::string map_static_save_dir_ = "/home/heht/PCD_/Map";
+    std::string map_dynamic_save_dir_ = "/home/heht/PCD_/Map";
     std::string scan_range_save_dir;
     std::string map_range_save_dir;
     std::string diff_range_save_dir;
@@ -145,9 +146,12 @@ public:
             const std::vector<pcl::PointCloud<PointType>::Ptr>& _scans,
             const std::vector<Eigen::Matrix4d>& _scans_poses,
             pcl::PointCloud<PointType>::Ptr& _ptcloud_to_save );
+    float globalPointDistance(PointType p, int idx);
+    float kdtreeDistance_global(PointType p, int idx);
     void scanMap( int idx, pcl::PointCloud<PointType>::Ptr& _ptcloud_to_save);
     void findDynamicPointsOfScanByKnn ( int _scan_idx );
     void slideWindows();
+    void initizlize();
     void CloudSubtraction(pcl::PointCloud<PointType>::Ptr& cloud0, pcl::PointCloud<PointType>::Ptr& cloud1, pcl::PointCloud<PointType>::Ptr& cloud2);
     void removeGround(std::string bin_path, pcl::PointCloud<PointType>::Ptr& cloud_unground, pcl::PointCloud<PointType>::Ptr& cloud_ground);
     void allocateMemory();
@@ -212,6 +216,7 @@ public:
     void scansideRemovalForEachScan(void);
     void saveCleanedScans(void);
     void saveMapPointcloudByMergingCleanedScans(void);
+    void saveInitilizeByMergingCleanedScans(void);
     void scansideRemovalForEachScanAndSaveThem(void);
 
     void saveStaticScan( int _scan_idx, const pcl::PointCloud<PointType>::Ptr& _ptcloud );

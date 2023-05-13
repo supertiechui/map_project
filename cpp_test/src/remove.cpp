@@ -78,6 +78,28 @@ void Removerter::cleanIntensity(pcl::PointCloud<PointType>::Ptr& points)
         points->at(i).intensity = 100;
     }
 }
+float Removerter::globalPointDistance(PointType pi, int idx) {
+    auto pose = scan_inverse_poses_.at(idx);
+    Eigen::Vector4d p1(pi.x, pi.y, pi.z, 1.0);
+    Eigen::Vector4d p2 = kSE3MatExtrinsicPoseBasetoLiDAR * pose * p1;
+    if(p2[0] < 0)
+        return 0.2;
+    return sqrt(p2[0]*p2[0] + p2[1]*p2[1] + p2[2]*p2[2]);
+//    return sqrt((p.x-p2.x)*(p.x-p2.x) + (p.y-p2.y)*(p.y-p2.y) + (p.z-p2.z)*(p.z-p2.z));
+}
+float Removerter::kdtreeDistance_global(PointType p, int idx)
+{
+    float distance = globalPointDistance(p, idx);
+    if(distance < 30){
+        return 0.2;
+    }else if(distance < 50){
+        return 0.3;
+    }else if(distance < 70){
+        return 0.8;
+    }else{
+        return 1.0;
+    }
+}
 //实现：cloud2 = cloud0 - cloud1
 //param[in]  pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud1://减数点云
 //param[in] pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud0：//被减数点云
@@ -182,17 +204,35 @@ void Removerter::removeGround(std::string bin_path, pcl::PointCloud<PointType>::
 //    cout << "Nonground Points #: " << nonground.rows() << endl;
 //    cout << "Time Taken : "<< time_taken / 1000000 << "(sec)" << endl;
 }
+void Removerter::initizlize() {
+    // map-side removals
+    for(float _rm_res: remove_resolution_list_) {
+        removeOnce( _rm_res );
+    }
+
+    // if you want to every iteration's map data, place below two lines to inside of the above for loop
+    saveCurrentStaticAndDynamicPointCloudGlobal(); // if you want to save within the global points uncomment this line
+
+    // TODO
+    // map-side reverts
+    // if you want to remove as much as possible, you can use omit this steps
+    for(float _rv_res: revert_resolution_list_) {
+        revertOnce( _rv_res );
+    }
+
+    // scan-side removals
+    scansideRemovalForEachScanAndSaveThem();
+}
 void Removerter::findDynamicPointsOfScanByKnn(int _scan_idx) {
+    clock_t beg = clock();
     pcl::PointCloud<PointType>::Ptr scan_orig = scans_.at(_scan_idx);
     auto scan_pose = scan_poses_.at(_scan_idx);
 
     // curr scan (in global coord)
     pcl::PointCloud<PointType>::Ptr scan_orig_global = local2global(scan_orig, _scan_idx);
 //    cleanIntensity(scan_orig_global);
-    kdtree_scan_global_curr_->setInputCloud(scan_orig_global);
     int num_points_of_a_scan = scan_orig_global->points.size();
 
-    //
     pcl::PointCloud<PointType>::Ptr scan_static_global (new pcl::PointCloud<PointType>);
     pcl::PointCloud<PointType>::Ptr scan_dynamic_global (new pcl::PointCloud<PointType>);
     pcl::PointCloud<PointType>::Ptr noisePoint (new pcl::PointCloud<PointType>);
@@ -200,15 +240,14 @@ void Removerter::findDynamicPointsOfScanByKnn(int _scan_idx) {
     {
         std::vector<int> topk_indexes_scan;
         std::vector<float> topk_L2dists_scan;
-        kdtree_map_scan->radiusSearch(scan_orig_global->points[pt_idx], 0.2, topk_indexes_scan, topk_L2dists_scan);
-        for(int i = 0; i < topk_indexes_scan.size(); i++)
-        {
-//            map_scan->points[topk_indexes_scan[i]].intensity = 0;
-            noisePoint->push_back(map_scan->points[topk_indexes_scan[i]]);
+        if(kdtree_map_scan->radiusSearch(scan_orig_global->points[pt_idx], 0.2, topk_indexes_scan, topk_L2dists_scan)){
+            scan_static_global->push_back(scan_orig_global->points[pt_idx]);
+        }else{
+            scan_dynamic_global->push_back(scan_orig_global->points[pt_idx]);
         }
     }
-    clock_t beg = clock();
-    voxelDownsampling(noisePoint, scan_static_global);
+
+//    voxelDownsampling(noisePoint, scan_static_global);
     clock_t end = clock();
     cout<<"time taken "<<(end - beg)/double(1000000)<<endl;
 //    CloudSubtraction(noisePoint, scan_orig_global, scan_dynamic_global);
@@ -218,8 +257,11 @@ void Removerter::findDynamicPointsOfScanByKnn(int _scan_idx) {
     std::string file_name5 = save_pcd_directory_ + "scan_map_static.pcd";
     pcl::io::savePCDFileBinary(file_name5, *scan_static_global);
 
+    std::string file_name6 = save_pcd_directory_ + "scan_map_dynamic.pcd";
+    pcl::io::savePCDFileBinary(file_name6, *scan_dynamic_global);
+
     cout<<"\033[1;32m The scan " << num_points_of_a_scan << "\033[0m"<<endl;
-    cout<<"\033[1;32m The number of scan map is " << map_scan->size() << "\033[0m"<<endl;
+    cout<<"\033[1;32m The number of scan_map is " << map_scan->size() << "\033[0m"<<endl;
     cout<<"\033[1;32m -- The number of static points in a scan: " << scan_static_global->points.size() << "\033[0m"<<endl;
     cout<<"\033[1;32m -- The number of dynamic points in a scan: " << scan_dynamic_global->points.size() << "\033[0m"<<endl;
 
@@ -228,64 +270,66 @@ void Removerter::findDynamicPointsOfScanByKnn(int _scan_idx) {
 void Removerter::slideWindows() {
     map_global_curr_static_->clear();
     map_global_curr_->clear();
-    for(int scan_idx = 5; scan_idx < scans_.size()-5; scan_idx++)
+    for(int scan_idx = initilize_idx; scan_idx < scans_.size()-5; scan_idx++)
     {
         clock_t beg_idx = clock();
         map_scan->clear();
         scanMap(scan_idx, map_scan);
+        if(map_scan->empty())
+        {
+            cout<<"Map has no points!!!"<<endl;
+            return;
+        }
         kdtree_map_scan->makeShared();
         kdtree_map_scan->setInputCloud(map_scan);
 //        cleanIntensity(map_scan);
-//        std::string file_name1 = save_pcd_directory_ + std::to_string(scan_idx)+ "scan_map.pcd";
-//        pcl::io::savePCDFileBinary(file_name1, *map_scan);
+        std::string file_name1 = save_pcd_directory_ + "scan_map_"+std::to_string(scan_idx)+ ".pcd";
+        pcl::io::savePCDFileBinary(file_name1, *map_scan);
 
         pcl::PointCloud<PointType>::Ptr scan_orig = scans_.at(scan_idx);
-//        pcl::PointCloud<PointType>::Ptr scan_ground = scans_ground.at(scan_idx);
         auto scan_pose = scan_poses_.at(scan_idx);
 
         // curr scan (in global coord)
         pcl::PointCloud<PointType>::Ptr scan_orig_global = local2global(scan_orig, scan_idx);
-//        pcl::PointCloud<PointType>::Ptr scan_ground_global = local2global(scan_ground, scan_idx);
         int num_points_of_a_scan = scan_orig_global->points.size();
 
         pcl::PointCloud<PointType>::Ptr scan_static_global (new pcl::PointCloud<PointType>);
         pcl::PointCloud<PointType>::Ptr scan_dynamic_global (new pcl::PointCloud<PointType>);
-        pcl::PointCloud<PointType>::Ptr static_noisePoint (new pcl::PointCloud<PointType>);
+//        pcl::PointCloud<PointType>::Ptr static_noisePoint (new pcl::PointCloud<PointType>);
         for (std::size_t pt_idx = 0; pt_idx < num_points_of_a_scan; pt_idx++)
         {
+            float kd_distance = kdtreeDistance_global(scan_orig_global->points[pt_idx], scan_idx);
             std::vector<int> topk_indexes_scan;
             std::vector<float> topk_L2dists_scan;
-            kdtree_map_scan->radiusSearch(scan_orig_global->points[pt_idx], 0.2, topk_indexes_scan, topk_L2dists_scan);
-            for (int ii: topk_indexes_scan)
-            {
-//                map_scan->points[ii].intensity = 0;
-                static_noisePoint->push_back(map_scan->points[ii]);
+            if( kdtree_map_scan->radiusSearch(scan_orig_global->points[pt_idx], 0.2, topk_indexes_scan, topk_L2dists_scan) ){
+                scan_static_global->push_back(scan_orig_global->points[pt_idx]);
+            }else{
+                scan_dynamic_global->push_back(scan_orig_global->points[pt_idx]);
             }
         }
+        pcl::PointCloud<PointType>::Ptr scan_static_local = global2local(scan_static_global, scan_idx);
+        pcl::PointCloud<PointType>::Ptr scan_dynamic_local = global2local(scan_dynamic_global, scan_idx);
+        scans_static_.emplace_back(scan_static_local);
+        scans_dynamic_.emplace_back(scan_dynamic_local);
 //        CloudSubtraction(static_noisePoint, scan_orig_global, scan_dynamic_global);
-        voxelDownsampling(static_noisePoint, scan_static_global);
-        *map_global_curr_static_ += *scan_static_global;
+//        voxelDownsampling(static_noisePoint, scan_static_global);
+//        *map_global_curr_static_ += *scan_static_global;
 //        *map_global_curr_static_ += *scan_ground_global;
         clock_t end_idx = clock();
-        if(scan_idx == 50){
-            std::string file_name4 = save_pcd_directory_ +"scan_map_static_"+std::to_string(scan_idx)+ ".pcd";
-            pcl::io::savePCDFileBinary(file_name4, *scan_static_global);
-        }
-
 
         cout<<"\033[1;33m The scan "<< scan_idx<<" time is " <<(end_idx - beg_idx)/double(1000000) <<"\033[0m"<<endl;
-        cout<<"\033[1;32m The number of scan map is " << map_scan->points.size() << "\033[0m"<<endl;
+        cout<<"\033[1;32m The number of scan is " << num_points_of_a_scan<< "\033[0m"<<endl;
         cout<<"\033[1;32m -- The number of static points in a scan: " << scan_static_global->points.size() << "\033[0m"<<endl;
-        cout<<"\033[1;32m -- The number of dynamic points in a scan: " << map_scan->points.size() - scan_static_global->points.size() << "\033[0m"<<endl;
+        cout<<"\033[1;32m -- The number of dynamic points in a scan: " << scan_dynamic_global->points.size() << "\033[0m"<<endl;
 
 //        usleep( kPauseTimeForClearStaticScanVisualization );
     }
-    clock_t beg_global = clock();
-    octreeDownsampling(map_global_curr_static_, map_global_curr_);
-    clock_t end_global = clock();
-    cout<<"\033[1;31m The global octree downsampling time is " <<(end_global - beg_global)/double(1000000) <<"\033[0m"<<endl;
-    std::string file_name1 = save_pcd_directory_ + "global_static_map.pcd";
-    pcl::io::savePCDFileBinary(file_name1, *map_global_curr_);
+//    clock_t beg_global = clock();
+//    octreeDownsampling(map_global_curr_static_, map_global_curr_);
+//    clock_t end_global = clock();
+//    cout<<"\033[1;31m The global octree downsampling time is " <<(end_global - beg_global)/double(1000000) <<"\033[0m"<<endl;
+//    std::string file_name1 = save_pcd_directory_ + "global_static_map.pcd";
+//    pcl::io::savePCDFileBinary(file_name1, *map_global_curr_);
 }
 void Removerter::get_scan_pose()
 {
@@ -562,10 +606,11 @@ void Removerter::scanMap(const std::vector<pcl::PointCloud<PointType>::Ptr> &_sc
                          pcl::PointCloud<PointType>::Ptr &_ptcloud_to_save)
 {
     // NOTE: _scans must be in local coord
-    for(std::size_t scan_idx = 30 ; scan_idx < 40; scan_idx++)
+
+    for(std::size_t scan_idx = _scans.size()-1 ; scan_idx >= _scans.size()-10; scan_idx--)
     {
-        if(scan_idx > 33 && scan_idx < 37)
-            continue;
+//        if(scan_idx > 33 && scan_idx < 37)
+//            continue;
         auto ii_scan = _scans.at(scan_idx); // pcl::PointCloud<PointType>::Ptr
         auto ii_pose = _scans_poses.at(scan_idx); // Eigen::Matrix4d
         // local to global (local2global)
@@ -583,17 +628,26 @@ void Removerter::scanMap(int idx, pcl::PointCloud<PointType>::Ptr& _ptcloud_to_s
         cout<<"Error idx for submap!"<<endl;
         return;
     }
-    for(std::size_t scan_idx = idx - 5 ; scan_idx < idx + 5; scan_idx++)
+    cout<<"The number of static scan is "<<scans_static_.size()<<endl;
+    for(std::size_t scan_idx = scans_static_.size() - 1 ; scan_idx >= scans_static_.size() - 5; scan_idx--)
     {
-        if(scan_idx > idx - 2 && scan_idx < idx + 2)
-            continue;
+        auto ii_scan = scans_static_.at(scan_idx);
+        auto ii_pose = scan_poses_.at(scan_idx); // Eigen::Matrix4d
+        // local to global (local2global)
+        pcl::PointCloud<PointType>::Ptr scan_global_coord(new pcl::PointCloud<PointType>());
+        pcl::transformPointCloud(*ii_scan, *scan_global_coord, kSE3MatExtrinsicLiDARtoPoseBase);
+        pcl::transformPointCloud(*scan_global_coord, *scan_global_coord, ii_pose);
+        // merge the scan into the global map
+        *_ptcloud_to_save += *scan_global_coord;
+    }
+    for(std::size_t scan_idx = idx + 2 ; scan_idx < idx + 5; scan_idx++)
+    {
         auto ii_scan = scans_.at(scan_idx); // pcl::PointCloud<PointType>::Ptr
         auto ii_pose = scan_poses_.at(scan_idx); // Eigen::Matrix4d
         // local to global (local2global)
         pcl::PointCloud<PointType>::Ptr scan_global_coord(new pcl::PointCloud<PointType>());
         pcl::transformPointCloud(*ii_scan, *scan_global_coord, kSE3MatExtrinsicLiDARtoPoseBase);
         pcl::transformPointCloud(*scan_global_coord, *scan_global_coord, ii_pose);
-
         // merge the scan into the global map
         *_ptcloud_to_save += *scan_global_coord;
     }
@@ -744,12 +798,12 @@ void Removerter::saveCurrentStaticAndDynamicPointCloudGlobal( void )
     std::string curr_res_alpha_str = std::to_string(curr_res_alpha_);
 
     // dynamic
-    std::string dyna_file_name = map_dynamic_save_dir_ + "/DynamicMapMapsideGlobalResX" + curr_res_alpha_str + ".pcd";
+    std::string dyna_file_name = map_dynamic_save_dir_ + "/DynamicMapInitizlizeGlobalResX" + curr_res_alpha_str + ".pcd";
     pcl::io::savePCDFileBinary(dyna_file_name, *map_global_curr_dynamic_);
     cout<<"\033[1;32m -- a pointcloud is saved: " << dyna_file_name << "\033[0m"<<endl;
 
     // static
-    std::string static_file_name = map_static_save_dir_ + "/StaticMapMapsideGlobalResX" + curr_res_alpha_str + ".pcd";
+    std::string static_file_name = map_static_save_dir_ + "/StaticMapInitizlizeGlobalResX" + curr_res_alpha_str + ".pcd";
     pcl::io::savePCDFileBinary(static_file_name, *map_global_curr_static_);
     cout<<"\033[1;32m -- a pointcloud is saved: " << static_file_name << "\033[0m"<<endl;
 } // saveCurrentStaticAndDynamicPointCloudGlobal
@@ -828,7 +882,7 @@ std::vector<int> Removerter::calcDescrepancyAndParseDynamicPointIdxForEachScan( 
 {
     std::vector<int> dynamic_point_indexes;
     // dynamic_point_indexes.reserve(100000);
-    for(std::size_t idx_scan=0; idx_scan < scans_.size(); ++idx_scan) {
+    for(std::size_t idx_scan=0; idx_scan < initilize_idx; ++idx_scan) {
         // curr scan
         pcl::PointCloud<PointType>::Ptr _scan = scans_.at(idx_scan);
 
@@ -856,27 +910,25 @@ std::vector<int> Removerter::calcDescrepancyAndParseDynamicPointIdxForEachScan( 
         std::vector<int> this_scan_dynamic_point_indexes = calcDescrepancyAndParseDynamicPointIdx(scan_rimg, diff_rimg, map_rimg_ptidx);
         dynamic_point_indexes.insert(dynamic_point_indexes.end(), this_scan_dynamic_point_indexes.begin(), this_scan_dynamic_point_indexes.end());
         // save scan_rimg
-        if(curr_res_alpha_ == 2.5)
-        {
-            std::string curr_res_alpha_str = std::to_string(curr_res_alpha_);
-            std::string file_name_orig = sequence_valid_scan_names_.at(idx_scan).substr(0,6) + "X";
-            std::string scan_range_name = scan_range_save_dir + "/" +file_name_orig + curr_res_alpha_str.substr(0,3) + ".jpg";
-            cv::Mat dst;
-            dst = convertColorMappedImg(scan_rimg, kRangeColorAxis);
-            cv::imwrite(scan_range_name, dst);
-
-            std::string map_range_name = map_range_save_dir + "/" +file_name_orig + curr_res_alpha_str.substr(0,3) + ".jpg";
-            cv::Mat dst1;
-            dst1 = convertColorMappedImg(map_rimg, kRangeColorAxis);
-            cv::imwrite(map_range_name, dst1);
-
-            std::string diff_range_name = diff_range_save_dir + "/" +file_name_orig + curr_res_alpha_str.substr(0,3) + ".jpg";
-            cv::Mat dst2;
-            dst2 = convertColorMappedImg(diff_rimg, kRangeColorAxis);
-            cv::imwrite(diff_range_name, dst2);
-
-
-        }
+//        if(curr_res_alpha_ == 2.5)
+//        {
+//            std::string curr_res_alpha_str = std::to_string(curr_res_alpha_);
+//            std::string file_name_orig = sequence_valid_scan_names_.at(idx_scan).substr(0,6) + "X";
+//            std::string scan_range_name = scan_range_save_dir + "/" +file_name_orig + curr_res_alpha_str.substr(0,3) + ".jpg";
+//            cv::Mat dst;
+//            dst = convertColorMappedImg(scan_rimg, kRangeColorAxis);
+//            cv::imwrite(scan_range_name, dst);
+//
+//            std::string map_range_name = map_range_save_dir + "/" +file_name_orig + curr_res_alpha_str.substr(0,3) + ".jpg";
+//            cv::Mat dst1;
+//            dst1 = convertColorMappedImg(map_rimg, kRangeColorAxis);
+//            cv::imwrite(map_range_name, dst1);
+//
+//            std::string diff_range_name = diff_range_save_dir + "/" +file_name_orig + curr_res_alpha_str.substr(0,3) + ".jpg";
+//            cv::Mat dst2;
+//            dst2 = convertColorMappedImg(diff_rimg, kRangeColorAxis);
+//            cv::imwrite(diff_range_name, dst2);
+//        }
 
         // visualization
 
@@ -1067,7 +1119,9 @@ void Removerter::saveStaticScan( int _scan_idx, const pcl::PointCloud<PointType>
     std::string file_name_orig = sequence_valid_scan_names_.at(_scan_idx);
     std::string file_name = scan_static_save_dir_ + "/" + file_name_orig.substr(0,6) + ".pcd";
     cout<<"\033[1;32m Scan " << _scan_idx << "'s static points is saved (" << file_name << ")\033[0m"<<endl;
-    pcl::io::savePCDFileBinary(file_name, *_ptcloud);
+    pcl::PointCloud<PointType>::Ptr scan_global_coord(new pcl::PointCloud<PointType>());
+    scan_global_coord = local2global(_ptcloud ,_scan_idx);
+    pcl::io::savePCDFileBinary(file_name, *scan_global_coord);
 } // saveStaticScan
 
 
@@ -1075,8 +1129,10 @@ void Removerter::saveDynamicScan( int _scan_idx, const pcl::PointCloud<PointType
 {
     std::string file_name_orig = sequence_valid_scan_names_.at(_scan_idx);
     std::string file_name = scan_dynamic_save_dir_ + "/" + file_name_orig.substr(0,6) + ".pcd";
-    cout<<"\033[1;32m Scan " << _scan_idx << "'s static points is saved (" << file_name << ")\033[0m"<<endl;
-    pcl::io::savePCDFileBinary(file_name, *_ptcloud);
+    cout<<"\033[1;32m Scan " << _scan_idx << "'s dynamic points is saved (" << file_name << ")\033[0m"<<endl;
+    pcl::PointCloud<PointType>::Ptr scan_global_coord(new pcl::PointCloud<PointType>());
+    scan_global_coord = local2global(_ptcloud ,_scan_idx);
+    pcl::io::savePCDFileBinary(file_name, *scan_global_coord);
 } // saveDynamicScan
 
 
@@ -1091,7 +1147,33 @@ void Removerter::saveCleanedScans(void)
     }
 } // saveCleanedScans
 
+void Removerter::saveInitilizeByMergingCleanedScans() {
+    // static map
+    {
+        pcl::PointCloud<PointType>::Ptr map_global_static_scans_merged_to_verify_full (new pcl::PointCloud<PointType>);
+        pcl::PointCloud<PointType>::Ptr map_global_static_scans_merged_to_verify (new pcl::PointCloud<PointType>);
+        mergeScansWithinGlobalCoord(scans_static_, scan_poses_, map_global_static_scans_merged_to_verify_full);
+        octreeDownsampling(map_global_static_scans_merged_to_verify_full, map_global_static_scans_merged_to_verify);
 
+        // global
+        std::string local_file_name = map_static_save_dir_ + "/StaticInitizlizeMapGlobal.pcd";
+        pcl::io::savePCDFileBinary(local_file_name, *map_global_static_scans_merged_to_verify);
+        cout<<"\033[1;32m  [For verification] A static pointcloud (cleaned scans merged) is saved (global coord): " << local_file_name << "\033[0m"<<endl;
+    }
+
+    // dynamic map
+    {
+        pcl::PointCloud<PointType>::Ptr map_global_dynamic_scans_merged_to_verify_full (new pcl::PointCloud<PointType>);
+        pcl::PointCloud<PointType>::Ptr map_global_dynamic_scans_merged_to_verify (new pcl::PointCloud<PointType>);
+        mergeScansWithinGlobalCoord(scans_dynamic_, scan_poses_, map_global_dynamic_scans_merged_to_verify_full);
+        octreeDownsampling(map_global_dynamic_scans_merged_to_verify_full, map_global_dynamic_scans_merged_to_verify);
+
+        // global
+        std::string local_file_name = map_dynamic_save_dir_ + "/DynamicInitizlizeMapGlobal.pcd";
+        pcl::io::savePCDFileBinary(local_file_name, *map_global_dynamic_scans_merged_to_verify);
+        cout<<"\033[1;32m  [For verification] A dynamic pointcloud (cleaned scans merged) is saved (global coord): " << local_file_name << "\033[0m"<<endl;
+    }
+}
 void Removerter::saveMapPointcloudByMergingCleanedScans(void)
 {
     // merge for verification
@@ -1106,17 +1188,17 @@ void Removerter::saveMapPointcloudByMergingCleanedScans(void)
         octreeDownsampling(map_global_static_scans_merged_to_verify_full, map_global_static_scans_merged_to_verify);
 
         // global
-        std::string local_file_name = map_static_save_dir_ + "/StaticMapScansideMapGlobal.pcd";
+        std::string local_file_name = map_static_save_dir_ + "/StaticMapGlobal.pcd";
         pcl::io::savePCDFileBinary(local_file_name, *map_global_static_scans_merged_to_verify);
         cout<<"\033[1;32m  [For verification] A static pointcloud (cleaned scans merged) is saved (global coord): " << local_file_name << "\033[0m"<<endl;
 
-        // local
-        pcl::PointCloud<PointType>::Ptr map_local_static_scans_merged_to_verify (new pcl::PointCloud<PointType>);
-        int base_node_idx = base_node_idx_;
-        transformGlobalMapToLocal(map_global_static_scans_merged_to_verify, base_node_idx, map_local_static_scans_merged_to_verify);
-        std::string global_file_name = map_static_save_dir_ + "/StaticMapScansideMapLocal.pcd";
-        pcl::io::savePCDFileBinary(global_file_name, *map_local_static_scans_merged_to_verify);
-        cout<<"\033[1;32m  [For verification] A static pointcloud (cleaned scans merged) is saved (local coord): " << global_file_name << "\033[0m"<<endl;
+//        // local
+//        pcl::PointCloud<PointType>::Ptr map_local_static_scans_merged_to_verify (new pcl::PointCloud<PointType>);
+//        int base_node_idx = base_node_idx_;
+//        transformGlobalMapToLocal(map_global_static_scans_merged_to_verify, base_node_idx, map_local_static_scans_merged_to_verify);
+//        std::string global_file_name = map_static_save_dir_ + "/StaticMapInitizlizeMapLocal.pcd";
+//        pcl::io::savePCDFileBinary(global_file_name, *map_local_static_scans_merged_to_verify);
+//        cout<<"\033[1;32m  [For verification] A static pointcloud (cleaned scans merged) is saved (local coord): " << global_file_name << "\033[0m"<<endl;
     }
 
     // dynamic map
@@ -1127,17 +1209,17 @@ void Removerter::saveMapPointcloudByMergingCleanedScans(void)
         octreeDownsampling(map_global_dynamic_scans_merged_to_verify_full, map_global_dynamic_scans_merged_to_verify);
 
         // global
-        std::string local_file_name = map_dynamic_save_dir_ + "/DynamicMapScansideMapGlobal.pcd";
+        std::string local_file_name = map_dynamic_save_dir_ + "/DynamicMapGlobal.pcd";
         pcl::io::savePCDFileBinary(local_file_name, *map_global_dynamic_scans_merged_to_verify);
         cout<<"\033[1;32m  [For verification] A dynamic pointcloud (cleaned scans merged) is saved (global coord): " << local_file_name << "\033[0m"<<endl;
 
-        // local
-        pcl::PointCloud<PointType>::Ptr map_local_dynamic_scans_merged_to_verify (new pcl::PointCloud<PointType>);
-        int base_node_idx = base_node_idx_;
-        transformGlobalMapToLocal(map_global_dynamic_scans_merged_to_verify, base_node_idx, map_local_dynamic_scans_merged_to_verify);
-        std::string global_file_name = map_dynamic_save_dir_ + "/DynamicMapScansideMapLocal.pcd";
-        pcl::io::savePCDFileBinary(global_file_name, *map_local_dynamic_scans_merged_to_verify);
-        cout<<"\033[1;32m  [For verification] A dynamic pointcloud (cleaned scans merged) is saved (local coord): " << global_file_name << "\033[0m"<<endl;
+//        // local
+//        pcl::PointCloud<PointType>::Ptr map_local_dynamic_scans_merged_to_verify (new pcl::PointCloud<PointType>);
+//        int base_node_idx = base_node_idx_;
+//        transformGlobalMapToLocal(map_global_dynamic_scans_merged_to_verify, base_node_idx, map_local_dynamic_scans_merged_to_verify);
+//        std::string global_file_name = map_dynamic_save_dir_ + "/DynamicMapInitizlizeMapLocal.pcd";
+//        pcl::io::savePCDFileBinary(global_file_name, *map_local_dynamic_scans_merged_to_verify);
+//        cout<<"\033[1;32m  [For verification] A dynamic pointcloud (cleaned scans merged) is saved (local coord): " << global_file_name << "\033[0m"<<endl;
     }
 } // saveMapPointcloudByMergingCleanedScans
 
@@ -1148,7 +1230,7 @@ void Removerter::scansideRemovalForEachScan( void )
     kdtree_map_global_curr_->setInputCloud(map_global_curr_);
 
     // for each scan
-    for(std::size_t idx_scan=0; idx_scan < scans_.size(); idx_scan++) {
+    for(std::size_t idx_scan=0; idx_scan < initilize_idx; idx_scan++) {
         auto [this_scan_static, this_scan_dynamic] = removeDynamicPointsOfScanByKnn(idx_scan);
         scans_static_.emplace_back(this_scan_static);
         scans_dynamic_.emplace_back(this_scan_dynamic);
@@ -1159,8 +1241,8 @@ void Removerter::scansideRemovalForEachScan( void )
 void Removerter::scansideRemovalForEachScanAndSaveThem( void )
 {
     scansideRemovalForEachScan();
-    saveCleanedScans();
-    saveMapPointcloudByMergingCleanedScans();
+//    saveCleanedScans();
+//    saveInitilizeByMergingCleanedScans();
 } // scansideRemovalForEachScanAndSaveThem
 
 
@@ -1171,26 +1253,31 @@ void Removerter::run( void )
     parseValidScanInfo();
     readValidScans();
 
-
     makeGlobalMap();
+    initizlize();
     slideWindows();
-
-
+//
+    saveCleanedScans();
+    saveMapPointcloudByMergingCleanedScans();
+//    int idx = initilize_idx + 5;
+//    pcl::PointCloud<PointType>::Ptr scan_global_coord(new pcl::PointCloud<PointType>());
+//    scan_global_coord = local2global(scans_[idx] ,idx);
+//    std::string file_name2 = save_pcd_directory_ + "scan.pcd";
+//    pcl::io::savePCDFileBinary(file_name2, *scan_global_coord);
+//
 //    map_scan->clear();
+//
 //    scanMap(scans_, scan_poses_, map_scan);
 ////    cleanIntensity(map_scan);
 //    std::string file_name1 = save_pcd_directory_ + "scan_map.pcd";
 //    pcl::io::savePCDFileBinary(file_name1, *map_scan);
 //    kdtree_map_scan->setInputCloud(map_scan);
 //
-//    findDynamicPointsOfScanByKnn(35);
+//    findDynamicPointsOfScanByKnn(idx);
 //    std::string file_name3 = save_pcd_directory_ + "scan_map_knn.pcd";
 //    pcl::io::savePCDFileBinary(file_name3, *map_scan);
-//
-//    pcl::PointCloud<PointType>::Ptr scan_global_coord(new pcl::PointCloud<PointType>());
-//    scan_global_coord = local2global(scans_[30] ,30);
-//    std::string file_name2 = save_pcd_directory_ + "scan.pcd";
-//    pcl::io::savePCDFileBinary(file_name2, *scan_global_coord);
+
+
     // construct initial map using the scans and the corresponding poses
 //    makeGlobalMap();
 //
@@ -1221,4 +1308,36 @@ void Removerter::run( void )
 //    pcl::io::savePCDFileBinary(file_name1, *ground);
 //    std::string file_name2 = save_pcd_directory_ + "scan_unground.pcd";
 //    pcl::io::savePCDFileBinary(file_name2, *unground);
+
+//    point distance test
+//    pcl::PointCloud<PointType>::Ptr point = scans_[35];
+////    pcl::PointCloud<PointType>::Ptr point = local2global(scans_[35], 35);
+//    pcl::PointCloud<PointType>::Ptr newpoint(new pcl::PointCloud<PointType>);
+//    int num_of_scan = point->points.size();
+//    int num_100 = 0;
+//    int num_100_200 = 0;
+//    int num_200_300 = 0;
+//    int num_300 = 0;
+//    for (int i = 0; i < num_of_scan; ++i) {
+//        float distance = pointDistance(point->points[i]);
+////        float distance = globalPointDistance(point->points[i], 35);
+////        if(distance >= 60)
+////            newpoint->points.push_back(point->points[i]);
+//
+//        if(distance < 20){
+//            num_100++;
+//        }else if(distance < 50){
+//            num_100_200++;
+//        }else if(distance < 80){
+//            num_200_300++;
+//        }else{
+//            num_300++;
+//        }
+//    }
+////    std::string file_name2 = save_pcd_directory_ + "scan_xyz.pcd";
+////    pcl::io::savePCDFileBinary(file_name2, *newpoint);
+//    cout<<"distance < 20 is "<<num_100<<endl;
+//    cout<<"distance < 50 is "<<num_100_200<<endl;
+//    cout<<"distance < 80 is "<<num_200_300<<endl;
+//    cout<<"distance > 80 is "<<num_300<<endl;
 }
