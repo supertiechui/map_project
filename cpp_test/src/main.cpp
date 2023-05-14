@@ -1,7 +1,7 @@
 //
 // Created by heht on 23-4-20.
 //
-# include "../include/remove.h"
+# include "remove.h"
 
 int main()
 {

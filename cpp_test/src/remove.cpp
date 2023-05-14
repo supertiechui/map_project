@@ -42,6 +42,8 @@ Removerter::Removerter()
 
 void Removerter::allocateMemory()
 {
+    kdtree_ptr.reset(new KD_TREE<PointType>(0.3, 0.6, 0.2));
+    ikd_Tree = *kdtree_ptr;
     map_scan.reset(new pcl::PointCloud<PointType>());
     kdtree_map_scan.reset(new pcl::KdTreeFLANN<PointType>());
 
@@ -240,6 +242,9 @@ void Removerter::findDynamicPointsOfScanByKnn(int _scan_idx) {
     {
         std::vector<int> topk_indexes_scan;
         std::vector<float> topk_L2dists_scan;
+        PointVector Searched_Points_radius;
+        ikd_Tree.Radius_Search(scan_orig_global->points[pt_idx],0.2, Searched_Points_radius);
+//        if( !Searched_Points_radius.empty() ){
         if(kdtree_map_scan->radiusSearch(scan_orig_global->points[pt_idx], 0.2, topk_indexes_scan, topk_L2dists_scan)){
             scan_static_global->push_back(scan_orig_global->points[pt_idx]);
         }else{
@@ -275,6 +280,7 @@ void Removerter::slideWindows() {
         clock_t beg_idx = clock();
         map_scan->clear();
         scanMap(scan_idx, map_scan);
+//        ikd_Tree.Build((*map_scan).points);
         if(map_scan->empty())
         {
             cout<<"Map has no points!!!"<<endl;
@@ -301,6 +307,9 @@ void Removerter::slideWindows() {
             float kd_distance = kdtreeDistance_global(scan_orig_global->points[pt_idx], scan_idx);
             std::vector<int> topk_indexes_scan;
             std::vector<float> topk_L2dists_scan;
+//            PointVector Searched_Points_radius;
+//            ikd_Tree.Radius_Search(scan_orig_global->points[pt_idx],0.2, Searched_Points_radius);
+//            if( !Searched_Points_radius.empty() ){
             if( kdtree_map_scan->radiusSearch(scan_orig_global->points[pt_idx], 0.2, topk_indexes_scan, topk_L2dists_scan) ){
                 scan_static_global->push_back(scan_orig_global->points[pt_idx]);
             }else{
@@ -607,10 +616,10 @@ void Removerter::scanMap(const std::vector<pcl::PointCloud<PointType>::Ptr> &_sc
 {
     // NOTE: _scans must be in local coord
 
-    for(std::size_t scan_idx = _scans.size()-1 ; scan_idx >= _scans.size()-10; scan_idx--)
+    for(std::size_t scan_idx = 32 ; scan_idx < 39; scan_idx++)
     {
-//        if(scan_idx > 33 && scan_idx < 37)
-//            continue;
+        if(scan_idx > 33 && scan_idx < 37)
+            continue;
         auto ii_scan = _scans.at(scan_idx); // pcl::PointCloud<PointType>::Ptr
         auto ii_pose = _scans_poses.at(scan_idx); // Eigen::Matrix4d
         // local to global (local2global)
@@ -652,7 +661,36 @@ void Removerter::scanMap(int idx, pcl::PointCloud<PointType>::Ptr& _ptcloud_to_s
         *_ptcloud_to_save += *scan_global_coord;
     }
 }
+void Removerter::makeInitiGlobalMap() {
+    // transform local to global and merging the scans
+    map_global_orig_->clear();
+    map_global_curr_->clear();
+//    std::vector<pcl::PointCloud<PointType>::Ptr> v1(scans_.begin(),scans_.begin()+initilize_idx+20);
+    mergeScansWithinGlobalCoord(std::vector<pcl::PointCloud<PointType>::Ptr> (scans_.begin(),scans_.begin()+initilize_idx+20), scan_poses_, map_global_orig_);
+    cout<<"\033[1;32m Map pointcloud (having redundant points) have: " << map_global_orig_->points.size() << " points.\033[0m"<<endl;
+    cout<<"\033[1;32m Downsampling leaf size is " << kDownsampleVoxelSize << " m.\033[0m"<<endl;
 
+    // remove repeated (redundant) points
+    // - using OctreePointCloudVoxelCentroid for downsampling
+    // - For a large-size point cloud should use OctreePointCloudVoxelCentroid rather VoxelGrid
+    octreeDownsampling(map_global_orig_, map_global_curr_);
+
+    // save the original cloud
+    if( kFlagSaveMapPointcloud ) {
+        // in global coord
+        std::string static_global_file_name = save_pcd_directory_ + "OriginalNoisyInitiMapGlobal.pcd";
+        pcl::io::savePCDFileBinary(static_global_file_name, *map_global_curr_);
+        cout<<"\033[1;32m The original pointcloud is saved (global coord): " << static_global_file_name << "\033[0m"<<endl;
+
+        // in local coord (i.e., base_node_idx == 0 means a start idx is the identity pose)
+        int base_node_idx = base_node_idx_;
+        pcl::PointCloud<PointType>::Ptr map_local_curr (new pcl::PointCloud<PointType>);
+        transformGlobalMapToLocal(map_global_curr_, base_node_idx, map_local_curr);
+        std::string static_local_file_name = save_pcd_directory_ + "OriginalNoisyMapLocal.pcd";
+        pcl::io::savePCDFileBinary(static_local_file_name, *map_local_curr);
+        cout<<"\033[1;32m The original pointcloud is saved (local coord): " << static_local_file_name << "\033[0m"<<endl;
+    }
+}
 void Removerter::makeGlobalMap( void )
 {
     // transform local to global and merging the scans
@@ -1253,27 +1291,38 @@ void Removerter::run( void )
     parseValidScanInfo();
     readValidScans();
 
-    makeGlobalMap();
+//    makeGlobalMap();
+    makeInitiGlobalMap();
     initizlize();
     slideWindows();
 //
     saveCleanedScans();
     saveMapPointcloudByMergingCleanedScans();
-//    int idx = initilize_idx + 5;
+//    int idx = 35;
 //    pcl::PointCloud<PointType>::Ptr scan_global_coord(new pcl::PointCloud<PointType>());
 //    scan_global_coord = local2global(scans_[idx] ,idx);
 //    std::string file_name2 = save_pcd_directory_ + "scan.pcd";
 //    pcl::io::savePCDFileBinary(file_name2, *scan_global_coord);
 //
 //    map_scan->clear();
-//
 //    scanMap(scans_, scan_poses_, map_scan);
-////    cleanIntensity(map_scan);
+
+
+
+    /*** 2. Load point cloud data */
+//    auto start = chrono::high_resolution_clock::now();
+//    ikd_Tree.Build((*map_scan).points);
+//    auto end      = chrono::high_resolution_clock::now();
+//    auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
+//    printf("Building tree takes: %0.3f ms\n", float(duration) / 1e3);
+//    printf("# of valid points: %d \n", ikd_Tree.validnum());
+//    cleanIntensity(map_scan);
 //    std::string file_name1 = save_pcd_directory_ + "scan_map.pcd";
 //    pcl::io::savePCDFileBinary(file_name1, *map_scan);
 //    kdtree_map_scan->setInputCloud(map_scan);
 //
 //    findDynamicPointsOfScanByKnn(idx);
+//
 //    std::string file_name3 = save_pcd_directory_ + "scan_map_knn.pcd";
 //    pcl::io::savePCDFileBinary(file_name3, *map_scan);
 

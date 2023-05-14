@@ -6,6 +6,11 @@
 #define CPP_TEST_REMOVE_H
 
 #include "utility.h"
+#include <ikd_Tree.h>
+using PointVector = KD_TREE<PointType>::PointVector;
+template class KD_TREE<PointType>;
+KD_TREE<PointType>::Ptr kdtree_ptr;
+KD_TREE<PointType> ikd_Tree;
 
 class Removerter {
 private:
@@ -47,8 +52,8 @@ private:
     std::vector<Eigen::Matrix4d> sequence_scan_inverse_poses_; // used for global to local
 
     // target region to removerting
-    int start_idx_ = 400;
-    int end_idx_ = 550;
+    int start_idx_ = 1;
+    int end_idx_ = 991;
     int initilize_idx = 20;
 
     bool use_keyframe_gap_ = true;
@@ -106,6 +111,8 @@ private:
 
     pcl::PointCloud<PointType>::Ptr map_scan;
     pcl::KdTreeFLANN<PointType>::Ptr kdtree_map_scan;
+
+
 
     pcl::KdTreeFLANN<PointType>::Ptr kdtree_map_global_curr_;
     pcl::KdTreeFLANN<PointType>::Ptr kdtree_scan_global_curr_;
@@ -166,6 +173,7 @@ public:
     void octreeDownsampling(const pcl::PointCloud<PointType>::Ptr& _src, pcl::PointCloud<PointType>::Ptr& _to_save);
     void voxelDownsampling(const pcl::PointCloud<PointType>::Ptr& _src, pcl::PointCloud<PointType>::Ptr& _to_save);
     void makeGlobalMap();
+    void makeInitiGlobalMap();
 
 
     void run(void);

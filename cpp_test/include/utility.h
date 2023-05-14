@@ -3,6 +3,7 @@
 #define _UTILITY_REMOVERT_H_
 #include "../patchworkpp/include/patchworkpp.h"
 
+
 #include <Eigen/Dense>
 #include <opencv/cv.h>
 #include <opencv2/opencv.hpp>
@@ -68,6 +69,7 @@ using std::endl;
 // )
 
 using PointType = pcl::PointXYZI;
+
 
 struct SphericalPoint
 {
